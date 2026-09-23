@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>とばされ傘（仮）</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+html,body{height:100%;overflow:hidden;background:#1d2636;touch-action:none;font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}
+canvas{display:block;width:100vw;height:100dvh}
+.ov{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:#101828b8;color:#fff;text-align:center;padding:24px}
+.ov h1{font-size:34px;letter-spacing:.06em}
+.ov p{font-size:15px;line-height:1.8;opacity:.92}
+.ov button{font:700 18px system-ui;padding:14px 40px;border:0;border-radius:14px;background:#f5c518;color:#2a2200;box-shadow:0 4px 0 #b28d05}
+.ov .ver{display:inline-block;padding:2px 12px;border-radius:999px;background:#ffffff22;font-size:13px}
+.hide{display:none}
+</style></head><body>
+<canvas id="c"></canvas>
+<div class="ov" id="ov">
+ <h1>とばされ傘</h1>
+ <span class="ver" id="ver"></span>
+ <p>台風で飛ばされた傘を、画面の外に出さないように。<br>
+ 下の扇で操作します。<br>
+ 左右に倒す＝傘の向き　外側ほど＝大きく開く<br>
+ 開くと風に流されやすく、閉じると早く落ちます。</p>
+ <p id="best"></p>
+ <button id="go">はじめる</button>
+</div>
+<script>
+// とばされ傘（仮）試作。数値はすべて CFG（画面の高さ H を 1 とした単位）
+const APP_VER='v1';
+const CFG={
+ playRatio:0.70,        // 画面の上 70% が空（遊ぶ場所）、下 30% が操作の扇
+ g:0.5,                 // 重力
+ drag:8.0,              // 空気の抵抗（大きいほど風の速さに早く合わさる）。全開で落ちる速さ＝g÷drag
+ areaMin:0.15,          // 閉じた時の風の受けやすさ
+ areaMax:1.0,           // 開いた時の風の受けやすさ
+ glide:0.55,            // 傾けた時に横へ流れる強さ
+ tiltMax:60,            // 傾きの最大（度）
+ windStart:0.22,        // 最初の風の強さ
+ windGrow:0.008,        // 1秒ごとに強くなる量
+ windMax:0.8,
+ upChance:0.4,          // 下から吹き上げる風になる確率（これに乗って高さを取り戻す）
+ windEvery:[2.6,4.2],   // 風が変わる間隔（秒）
+ warnSec:1.0,           // 風が変わる前の予告（雨の傾き＋矢印）
+ calmChance:0.18        // 無風になる確率
+};
+const cv=document.getElementById('c'),cx=cv.getContext('2d');
+let W=0,H=0,DPR=1;
+function resize(){DPR=Math.min(2,window.devicePixelRatio||1);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;cx.setTransform(DPR,0,0,DPR,0,0);}
+addEventListener('resize',resize);resize();
+document.getElementById('ver').textContent='バージョン '+APP_VER;
+// ── 状態
+let st='title',t=0,best=+(localStorage.getItem('kasa-best')||0);
+const u={x:.5,y:.3,vx:0,vy:0,open:.6,tilt:0,spin:0};       // x は横幅に対する割合、y は高さ H に対する割合
+const ctl={ang:0,rad:.6,down:false};                      // 扇の入力（ang: -1〜1、rad: 0〜1）
+let wind={x:0,y:0},windTo={x:0,y:0},nextAt=0,warnAt=0,windFrom={x:0,y:0},changeT=0;
+const drops=Array.from({length:140},()=>({x:Math.random(),y:Math.random(),l:.5+Math.random()*.8}));
+function fan(){const pr=CFG.playRatio,cxp=W/2,cyp=H*.985,R=Math.min(W*.46,H*(1-pr)*1.05);return{cx:cxp,cy:cyp,R,r0:R*.18};}
+// ── 操作：扇の中の位置 → 向きと開き具合
+function setCtl(px,py){const f=fan();const dx=px-f.cx,dy=f.cy-py;let a=Math.atan2(dx,Math.max(1,dy))*180/Math.PI; // 0＝真上
+ a=Math.max(-CFG.tiltMax,Math.min(CFG.tiltMax,a));ctl.ang=a/CFG.tiltMax;
+ const d=Math.hypot(dx,dy);ctl.rad=Math.max(0,Math.min(1,(d-f.r0)/(f.R-f.r0)));}
+cv.addEventListener('pointerdown',e=>{if(st!=='play')return;if(e.clientY<H*CFG.playRatio-10)return;ctl.down=true;cv.setPointerCapture(e.pointerId);setCtl(e.clientX,e.clientY);});
+cv.addEventListener('pointermove',e=>{if(ctl.down)setCtl(e.clientX,e.clientY);});
+addEventListener('pointerup',()=>{ctl.down=false;});
+// ── 風
+function pickWind(){const s=Math.min(CFG.windMax,CFG.windStart+CFG.windGrow*t);
+ if(Math.random()<CFG.calmChance)return{x:0,y:0};
+ const k=s*(.55+Math.random()*.45);
+ if(Math.random()<CFG.upChance){const a=-Math.PI/2+(Math.random()-.5)*1.4;return{x:Math.cos(a)*k,y:Math.sin(a)*k};} // 吹き上げ（上向き±40°）
+ const a=Math.random()*Math.PI*2;return{x:Math.cos(a)*k,y:Math.sin(a)*k*.8};}
+function schedule(now){windFrom={...wind};windTo=pickWind();const [a,b]=CFG.windEvery;nextAt=now+a+Math.random()*(b-a);warnAt=nextAt-CFG.warnSec;}
+// ── 物理
+function step(dt){
+ t+=dt;
+ if(t>=nextAt){wind={...windTo};schedule(t);}
+ u.open+=(ctl.rad-u.open)*Math.min(1,dt*10);                 // 開閉は少しだけなめらかに
+ u.tilt+=(ctl.ang*CFG.tiltMax-u.tilt)*Math.min(1,dt*10);
+ const area=CFG.areaMin+(CFG.areaMax-CFG.areaMin)*u.open;
+ const aspect=W/H;                                             // 横方向は H 単位に直して計算
+ const rx=wind.x-u.vx,ry=wind.y-u.vy,rs=Math.hypot(rx,ry);   // 傘から見た空気の流れ
+ const th=u.tilt*Math.PI/180,nx=Math.sin(th),ny=-Math.cos(th); // 傘の頭が向いている方向
+ const face=rs>1e-4?Math.abs((rx*nx+ry*ny)/rs):1;             // 風に正面を向けるほど受ける
+ const k=CFG.drag*area*(.55+.45*face);
+ let ax=k*rx,ay=k*ry+CFG.g;
+ ax+=CFG.drag*area*CFG.glide*Math.sin(th)*rs;                 // 傾けた方へ流れる（帆のように）
+ u.vx+=ax*dt;u.vy+=ay*dt;u.x+=u.vx*dt/aspect;u.y+=u.vy*dt;
+ u.spin+=(u.vx*.6-u.spin)*dt;
+ for(const d of drops){d.y+=dt*(1.6+d.l)*.9;d.x+=dt*rainTilt()*(1.2+d.l)*.9;if(d.y>1){d.y-=1;d.x=Math.random();}if(d.x<0)d.x+=1;if(d.x>1)d.x-=1;}
+ const m=.04;if(u.x<-m||u.x>1+m||u.y<-m*1.2||u.y>CFG.playRatio+m)over();
+}
+function rainTilt(){ // 予告：次の風が来る 1 秒前から、雨の傾きが次の風へ寄っていく
+ const w=t>=warnAt?lerp(wind.x,windTo.x,Math.min(1,(t-warnAt)/CFG.warnSec)):wind.x;return w*1.6;}
+const lerp=(a,b,k)=>a+(b-a)*k;
+// ── 描画
+function draw(){
+ const pr=CFG.playRatio,PH=H*pr;
+ const g=cx.createLinearGradient(0,0,0,PH);g.addColorStop(0,'#2c3a52');g.addColorStop(1,'#56657c');cx.fillStyle=g;cx.fillRect(0,0,W,PH);
+ // 街のシルエット
+ cx.fillStyle='#303a4c';for(let i=0;i<14;i++){const bw=W/12,bx=i*bw-bw*.3,bh=PH*(.05+((i*37)%7)/60);cx.fillRect(bx,PH-bh,bw*.86,bh);}
+ // 雨
+ const rt=rainTilt();cx.strokeStyle='#c9d6e866';cx.lineWidth=1.2;cx.beginPath();
+ for(const d of drops){const x=d.x*W,y=d.y*PH,len=PH*.035*d.l;cx.moveTo(x,y);cx.lineTo(x+rt*len*.8,y+len);}cx.stroke();
+ // 予告の矢印（風が吹いてくる側）
+ if(st==='play'&&t>=warnAt){const k=Math.min(1,(t-warnAt)/CFG.warnSec),w=windTo,s=Math.hypot(w.x,w.y);
+  if(s>.05){const ux=w.x/s,uy=w.y/s,ex=W/2-ux*W*.42,ey=PH/2-uy*PH*.42;cx.save();cx.globalAlpha=.35+.5*k;cx.translate(ex,ey);cx.rotate(Math.atan2(uy,ux));
+   cx.fillStyle='#bfe8ff';cx.beginPath();const L=18+26*Math.min(1,s);cx.moveTo(L,0);cx.lineTo(-L*.6,-L*.55);cx.lineTo(-L*.25,0);cx.lineTo(-L*.6,L*.55);cx.closePath();cx.fill();cx.restore();}}
+ // 傘
+ drawUmbrella(u.x*W,u.y*H,Math.min(W,PH)*.12,u.open,u.tilt+u.spin*8);
+ // 下の操作エリア
+ cx.fillStyle='#223047';cx.fillRect(0,PH,W,H-PH);drawFan();
+ // 時間
+ if(st==='play'){cx.fillStyle='#fff';cx.font='700 22px system-ui';cx.textAlign='center';cx.fillText(t.toFixed(1)+' 秒',W/2,34);}
+}
+function drawUmbrella(x,y,s,o,deg){
+ cx.save();cx.translate(x,y);cx.rotate(deg*Math.PI/180);
+ const w=s*(.35+.85*o),h=s*(.9-.35*o);               // 開くほど横に広く、低く
+ cx.strokeStyle='#5b3a1e';cx.lineWidth=Math.max(2,s*.05);cx.beginPath();cx.moveTo(0,-h*.9);cx.lineTo(0,s*.75);cx.stroke();
+ cx.beginPath();cx.arc(-s*.09,s*.75,s*.09,0,Math.PI);cx.stroke();
+ cx.fillStyle='#f5c518';cx.beginPath();cx.moveTo(-w,0);cx.quadraticCurveTo(-w*.9,-h,0,-h);cx.quadraticCurveTo(w*.9,-h,w,0);
+ const n=6;for(let i=n;i>=0;i--){const x0=-w+2*w*i/n,x1=-w+2*w*(i-.5)/n;if(i>0)cx.quadraticCurveTo(x1,-h*.18,x0-2*w/n,0);}cx.closePath();cx.fill();
+ cx.strokeStyle='#c99a06';cx.lineWidth=1.5;for(let i=1;i<n;i++){const x0=-w+2*w*i/n;cx.beginPath();cx.moveTo(0,-h);cx.quadraticCurveTo(x0*.7,-h*.5,x0,0);cx.stroke();}
+ cx.restore();}
+function drawFan(){const f=fan(),a0=-Math.PI/2-CFG.tiltMax*Math.PI/180,a1=-Math.PI/2+CFG.tiltMax*Math.PI/180;
+ cx.save();cx.fillStyle='#ffffff10';cx.strokeStyle='#ffffff55';cx.lineWidth=1.5;
+ cx.beginPath();cx.arc(f.cx,f.cy,f.R,a0,a1);cx.arc(f.cx,f.cy,f.r0,a1,a0,true);cx.closePath();cx.fill();cx.stroke();
+ cx.strokeStyle='#ffffff22';for(const k of [.33,.66]){cx.beginPath();cx.arc(f.cx,f.cy,f.r0+(f.R-f.r0)*k,a0,a1);cx.stroke();}
+ for(const d of [-30,0,30]){const a=-Math.PI/2+d*Math.PI/180;cx.beginPath();cx.moveTo(f.cx+Math.cos(a)*f.r0,f.cy+Math.sin(a)*f.r0);cx.lineTo(f.cx+Math.cos(a)*f.R,f.cy+Math.sin(a)*f.R);cx.stroke();}
+ cx.fillStyle='#ffffff99';cx.font='12px system-ui';cx.textAlign='center';cx.fillText('とじる',f.cx,f.cy-f.r0-6);cx.fillText('ひらく',f.cx,f.cy-f.R+16);
+ const a=-Math.PI/2+ctl.ang*CFG.tiltMax*Math.PI/180,r=f.r0+(f.R-f.r0)*ctl.rad,kx=f.cx+Math.cos(a)*r,ky=f.cy+Math.sin(a)*r;
+ cx.strokeStyle='#ffffffcc';cx.lineWidth=2;cx.beginPath();cx.moveTo(f.cx,f.cy);cx.lineTo(kx,ky);cx.stroke();
+ cx.fillStyle=ctl.down?'#f5c518':'#bfe0ff';cx.beginPath();cx.arc(kx,ky,Math.max(14,f.R*.07),0,Math.PI*2);cx.fill();cx.restore();}
+// ── 進行
+let last=0;
+function loop(ts){const dt=Math.min(.033,(ts-last)/1000||0);last=ts;if(st==='play')step(dt);else{for(const d of drops){d.y+=dt*1.2;if(d.y>1)d.y-=1;}}draw();requestAnimationFrame(loop);}
+function start(){Object.assign(u,{x:.5,y:.25,vx:0,vy:0,open:.6,tilt:0,spin:0});Object.assign(ctl,{ang:0,rad:.6,down:false});
+ t=0;wind={x:0,y:0};schedule(0);nextAt=2.2;warnAt=nextAt-CFG.warnSec;st='play';document.getElementById('ov').classList.add('hide');}
+function over(){st='over';if(t>best){best=t;try{localStorage.setItem('kasa-best',best.toFixed(1));}catch(e){}}
+ const ov=document.getElementById('ov');ov.querySelector('h1').textContent=t.toFixed(1)+' 秒';document.getElementById('best').textContent='ベスト '+best.toFixed(1)+' 秒';
+ document.getElementById('go').textContent='もう一度';ov.classList.remove('hide');}
+document.getElementById('go').onclick=start;
+if(best)document.getElementById('best').textContent='ベスト '+best.toFixed(1)+' 秒';
+requestAnimationFrame(loop);
+</script></body></html>
