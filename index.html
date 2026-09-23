@@ -26,10 +26,12 @@ canvas{display:block;width:100vw;height:100dvh}
 </div>
 <script>
 // とばされ傘（仮）試作。数値はすべて CFG（画面の高さ H を 1 とした単位）
-const APP_VER='v1';
+const APP_VER='v2'; // 全開なら落ちない（浮く）
+// const APP_VER='v1';
 const CFG={
  playRatio:0.70,        // 画面の上 70% が空（遊ぶ場所）、下 30% が操作の扇
- g:0.5,                 // 重力
+ g:0.5,                 // 重力（閉じた時）
+ liftPow:1.6,           // 開くほど重さが消える。全開で落ちない、半分ならゆっくり落ちる（重さ＝g×(1−開き^liftPow)）
  drag:8.0,              // 空気の抵抗（大きいほど風の速さに早く合わさる）。全開で落ちる速さ＝g÷drag
  areaMin:0.15,          // 閉じた時の風の受けやすさ
  areaMax:1.0,           // 開いた時の風の受けやすさ
@@ -81,7 +83,7 @@ function step(dt){
  const th=u.tilt*Math.PI/180,nx=Math.sin(th),ny=-Math.cos(th); // 傘の頭が向いている方向
  const face=rs>1e-4?Math.abs((rx*nx+ry*ny)/rs):1;             // 風に正面を向けるほど受ける
  const k=CFG.drag*area*(.55+.45*face);
- let ax=k*rx,ay=k*ry+CFG.g;
+ let ax=k*rx,ay=k*ry+CFG.g*(1-Math.pow(u.open,CFG.liftPow)); // 全開で重さ0＝浮く
  ax+=CFG.drag*area*CFG.glide*Math.sin(th)*rs;                 // 傾けた方へ流れる（帆のように）
  u.vx+=ax*dt;u.vy+=ay*dt;u.x+=u.vx*dt/aspect;u.y+=u.vy*dt;
  u.spin+=(u.vx*.6-u.spin)*dt;
